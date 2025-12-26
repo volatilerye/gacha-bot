@@ -1,8 +1,10 @@
 """handle item model."""
 
+from __future__ import annotations
+
 import re
 from fractions import Fraction
-from typing import Collection, Self
+from typing import Collection
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -14,17 +16,21 @@ class ProbabilityError(Exception):
     """errors about probability."""
 
 
-class PreItemModel(BaseModel):
-    """item model before handling."""
+class FrozenBaseModel(BaseModel):
+    """frozen pydantic base model."""
 
     model_config = ConfigDict(frozen=True)
+
+
+class PreItemModel(FrozenBaseModel):
+    """item model before handling."""
 
     name: str
     prob_weight: Fraction = Field(ge=0, default_factory=Fraction)
     required: int = Field(ge=0, default=1)
 
     @staticmethod
-    def build_all(text: str) -> list[Self]:
+    def build_all(text: str) -> tuple[PreItemModel, ...]:
         """build all PreItemModel instances from string.
 
         Args:
@@ -33,14 +39,14 @@ class PreItemModel(BaseModel):
         Returns:
             list[ItemModel]: generated item models.
         """
-        return [
+        return tuple(
             PreItemModel.build(text=unit)
             for unit in re.split(pattern=LINE_SEPARATORS, string=text)
             if len(unit) > 0
-        ]
+        )
 
     @staticmethod
-    def build(text: str) -> Self:
+    def build(text: str) -> PreItemModel:
         """build PreItemModel instance from string.
 
         Args:
@@ -68,10 +74,13 @@ class PreItemModel(BaseModel):
                     prob_weight=Fraction(split_list[1]),
                     required=int(split_list[2]),
                 )
+            case _:
+                pass
+
         raise AssertionError(f"Expected code to be unreachable, but got: {text}")
 
 
-class ItemModel(BaseModel):
+class ItemModel(FrozenBaseModel):
     """item model."""
 
     model_config = ConfigDict(frozen=True)
@@ -82,7 +91,7 @@ class ItemModel(BaseModel):
     _quantity: int = PrivateAttr(default=0)
 
     @staticmethod
-    def build_from_text(text: str) -> list[Self]:
+    def build_from_text(text: str) -> tuple[ItemModel, ...]:
         """build preprocessed item list from string.
 
         Args:
@@ -95,7 +104,9 @@ class ItemModel(BaseModel):
         return ItemModel.build_from_pre_model(pre_models)
 
     @staticmethod
-    def build_from_pre_model(items: Collection[PreItemModel]) -> list[Self]:
+    def build_from_pre_model(
+        items: Collection[PreItemModel],
+    ) -> tuple[ItemModel, ...]:
         """build preprocessed item list from PreItemModel instances.
 
         Args:
@@ -110,22 +121,22 @@ class ItemModel(BaseModel):
 
         # all weights are integer
         if all(isinstance(item.prob_weight, int) for item in items):
-            return [
-                PreItemModel(
+            return tuple(
+                ItemModel(
                     name=item.name,
                     prob=Fraction(item.prob_weight, sum_weight),
                     required=item.required,
                 )
                 for item in items
-            ]
+            )
 
         if sum_weight > 1:
             raise ProbabilityError("the probability of all events is over 1.")
 
-        return [
-            PreItemModel(name=item.name, prob=item.prob_weight, required=item.required)
+        return tuple(
+            ItemModel(name=item.name, prob=item.prob_weight, required=item.required)
             for item in items
-        ]
+        )
 
     def add_quantity(self) -> None:
         """add stock quantity."""
@@ -134,3 +145,24 @@ class ItemModel(BaseModel):
     def get_quantity(self) -> int:
         """add stock quantity."""
         return self._quantity
+
+
+class ItemTable(FrozenBaseModel):
+    """handle an item table."""
+
+    items: tuple[ItemModel, ...]
+
+    @staticmethod
+    def loads(text: str) -> ItemTable:
+        """load an item table from string.
+
+        Args:
+            text (str): item properties text.
+
+        Args:
+            ItemTable: generated item table.
+        """
+        return ItemTable(items=ItemModel.build_from_text(text))
+
+    def __getitem__(self, item: int | slice):
+        return self.items[item]
