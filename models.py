@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from fractions import Fraction
-from typing import Collection
+from typing import Collection, Generator, override
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -164,5 +164,6 @@ class ItemTable(FrozenBaseModel):
         """
         return ItemTable(items=ItemModel.build_from_text(text))
 
-    def __getitem__(self, item: int | slice):
-        return self.items[item]
+    @override
+    def __iter__(self) -> Generator[ItemModel, None, None]:
+        yield from self.items
