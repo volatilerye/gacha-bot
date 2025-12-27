@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import bisect
+import math
+import operator
 import random
 import re
 from fractions import Fraction
-from typing import Collection, Generator, Self, overload, override
+from functools import reduce
+from typing import Collection, Generator, Literal, Self, overload, override
 
+# from itertools import
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from util import convert_index_to_prod_combination, convert_prod_combination_to_index
 
 LINE_SEPARATORS = "[\r\n]"
 COMMA_PATTERN = "[,、，]"
@@ -91,11 +97,14 @@ class ItemModel(FrozenBaseModel):
     name: str = Field(default_factory=str)
     prob: Fraction = Field(default_factory=Fraction, ge=0, le=1)
     required: int = Field(default=1, ge=0)
-    quantity: int = Field(default_factory=int)
+
+    # use in monte carlo simulation
+    quantity: int = Field(default_factory=int, ge=0)
 
     # use in calc_prob_dist
     is_grouped: bool = Field(default_factory=bool)  # False
     group_size: int = Field(default=1, gt=0)
+    quantity_state: tuple[int, ...]
 
     @staticmethod
     def build_from_text(text: str) -> tuple[ItemModel, ...]:
@@ -133,6 +142,7 @@ class ItemModel(FrozenBaseModel):
                     name=item.name,
                     prob=Fraction(item.prob_weight, sum_weight),
                     required=item.required,
+                    quantity_state=tuple([1] + [0] * item.required),
                 )
                 for item in items
             )
@@ -141,7 +151,12 @@ class ItemModel(FrozenBaseModel):
             raise ProbabilityError("the probability of all events is over 1.")
 
         return tuple(
-            ItemModel(name=item.name, prob=item.prob_weight, required=item.required)
+            ItemModel(
+                name=item.name,
+                prob=item.prob_weight,
+                required=item.required,
+                quantity_state=tuple([1] + [0] * item.required),
+            )
             for item in items
         )
 
@@ -149,7 +164,15 @@ class ItemModel(FrozenBaseModel):
 class ItemTable(FrozenBaseModel):
     """handle an item table."""
 
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     items: tuple[ItemModel, ...]
+
+    _cache_index_size: int | None = PrivateAttr(default=None)
+    _cache_mat: np.ndarray | None = PrivateAttr(default=None)
+    _cache_mat_inv: np.ndarray | None = PrivateAttr(default=None)
+    _cache_ave: float | None = PrivateAttr(default=None)
+    _cache_std: float | None = PrivateAttr(default=None)
 
     @staticmethod
     def loads(text: str) -> ItemTable:
@@ -179,7 +202,7 @@ class ItemTable(FrozenBaseModel):
     def __iter__(self) -> Generator[ItemModel, None, None]:
         yield from self.items
 
-    def add_quantity(self, index: int) -> Self:
+    def _add_quantity(self, index: int) -> Self:
         """add item quantity.
 
         Args:
@@ -197,7 +220,7 @@ class ItemTable(FrozenBaseModel):
             )
         )
 
-    def reset_quantities(self) -> Self:
+    def _reset_quantities(self) -> Self:
         """reset quantities of all items to zero.
 
         Returns:
@@ -207,14 +230,14 @@ class ItemTable(FrozenBaseModel):
             items=tuple(item.model_copy(update={"quantity": 0}) for item in self)
         )
 
-    def run_monte_carlo(self, attempts: int = 1000) -> list[int]:
-        """run monte carlo simulation.
+    def run_monte_carlo(self, attempts: int = 2000) -> list[float]:
+        """run monte carlo simulation and return the probability distribution function.
 
         Args:
             attempts (int, optional): number of attempts. Defaults to 1000.
 
         Returns:
-            list[int]: list of gacha counts for each attempt.
+            list[float]: pdf values.
         """
         attempt_count: int = 0
         gacha_count: int = 0
@@ -226,13 +249,13 @@ class ItemTable(FrozenBaseModel):
         ]
 
         while attempt_count < attempts:
-            gacha_table: ItemTable = self.reset_quantities()
+            gacha_table: ItemTable = self._reset_quantities()
             gacha_count = 0
 
             while True:
                 index = bisect.bisect_right(cumulative_prob, random.random())
                 if index < len(cumulative_prob):
-                    gacha_table = gacha_table.add_quantity(index=index)
+                    gacha_table = gacha_table._add_quantity(index=index)
 
                 gacha_count += 1
                 if all(item.quantity >= item.required for item in gacha_table):
@@ -240,7 +263,7 @@ class ItemTable(FrozenBaseModel):
                     attempt_count += 1
                     break
 
-        return results
+        return [float(results.count(i) / attempts) for i in range(0, max(results) + 1)]
 
     def _optimize(self) -> Self:
         """optimize markov process to reduce number of state.
@@ -263,6 +286,13 @@ class ItemTable(FrozenBaseModel):
                             "is_grouped": True,
                             "group_size": reduced_items[i].group_size
                             + reduced_items[j].group_size,
+                            "quantity_state": tuple(
+                                f_qs + l_qs
+                                for f_qs, l_qs in zip(
+                                    reduced_items[i].quantity_state,
+                                    reduced_items[j].quantity_state,
+                                )
+                            ),
                         }
                     )
                     reduced_items[j] = reduced_items[j].model_copy(
@@ -273,5 +303,233 @@ class ItemTable(FrozenBaseModel):
             items=tuple(item for item in reduced_items if item.required > 0)
         )
 
-    def calc_prob_dist(self) -> np.ndarray:
-        return np.array([1])
+    def _to_index(self) -> int:
+        """convert current quantity state to lexicographic index.
+        Returns:
+            int: lexicographic index of the current quantity state.
+        """
+        return convert_prod_combination_to_index(
+            n=[item.required + item.group_size for item in self],
+            combination=[
+                [
+                    sum(item.quantity_state[: i + 1]) + i
+                    for i, _ in enumerate(item.quantity_state)
+                ][:-1]
+                for item in self
+            ],
+        )
+
+    def _from_index(self, index: int) -> Self:
+        """create ItemTable from lexicographic index.
+
+        Args:
+            index (int): lexicographic index.
+
+        Returns:
+            Self: generated ItemTable.
+        """
+        combination = convert_index_to_prod_combination(
+            n=[item.required + item.group_size for item in self],
+            k=[item.required for item in self],
+            index=index,
+        )
+
+        items: list[ItemModel] = []
+
+        for i, item in enumerate(self):
+            group_comb = [-1] + list(combination[i]) + [item.required + item.group_size]
+            items.append(
+                item.model_copy(
+                    update={
+                        "quantity_state": tuple(
+                            group_comb[i] - group_comb[i - 1] - 1
+                            for i, _ in enumerate(group_comb[1:], start=1)
+                        )
+                    }
+                )
+            )
+        return self.model_copy(update={"items": tuple(items)})
+
+    def _prob_to_move(self, src_index: int, dst_index: int) -> float:
+        """calculate probability to move from src state to dst state.
+
+        Args:
+            src_index (int): the index of the source state.
+            dst_index (int): the index of the destination state.
+
+        Returns:
+            float: probability of moving from src to dst.
+        """
+        src = self._from_index(src_index)
+        dst = self._from_index(dst_index)
+
+        filtered = [
+            {"src": src_item, "dst": dst_item}
+            for src_item, dst_item in zip(src, dst)
+            if src_item.quantity_state != dst_item.quantity_state
+        ]
+
+        # impossible process
+        if len(filtered) > 1:
+            return 0
+
+        if len(filtered) == 0:
+            return float(sum(item.prob * item.quantity_state[-1] for item in src))
+
+        diff = filtered[0]
+        for i, _ in enumerate(diff["src"].quantity_state[:-1]):
+            if (
+                diff["src"].quantity_state[i] - 1 == diff["dst"].quantity_state[i]
+                and diff["src"].quantity_state[i + 1]
+                == diff["dst"].quantity_state[i + 1] - 1
+            ):
+                return float(diff["src"].prob * diff["src"].quantity_state[i])
+            elif diff["src"].quantity_state[i] != diff["dst"].quantity_state[i]:
+                return 0
+
+        raise AssertionError("Expected code to be unreachable.")
+
+    def _generate_prob_matrix(self) -> np.ndarray:
+        """generate probability matrix of the markov process.
+
+        Returns:
+            np.ndarray: probability matrix.
+        """
+        if self._cache_index_size is None:
+            raise AssertionError("cache index size is not set.")
+
+        return np.array(
+            [
+                [
+                    self._prob_to_move(i, j)
+                    for j in list(range(self._cache_index_size))[::-1]
+                ]
+                for i in list(range(self._cache_index_size))[::-1]
+            ]
+        )
+
+    def _set_caches(self) -> None:
+        """set caches for probability matrix and its inverse."""
+        if self._cache_index_size is None:
+            n_list = [item.required + item.group_size for item in self]
+            k_list = [item.required for item in self]
+
+            self._cache_index_size = reduce(
+                operator.mul, [math.comb(n, k) for n, k in zip(n_list, k_list)]
+            )
+        if self._cache_index_size is None:
+            raise AssertionError("cache index size is not set.")
+
+        if self._cache_mat is None:
+            self._cache_mat = self._generate_prob_matrix()
+        if self._cache_mat_inv is None:
+            E = np.identity(self._cache_index_size - 1)
+            Q = self._cache_mat[:-1, :-1]
+            self._cache_mat_inv = np.linalg.inv(E - Q)
+        if self._cache_ave is None:
+            self._cache_ave = self._calc_average()
+        if self._cache_std is None:
+            self._cache_std = self._calc_std()
+
+    def _calc_average(self) -> float:
+        """calculate average count to collect all items.
+
+        Returns:
+            float: average count.
+        """
+        if self._cache_index_size is None or self._cache_mat is None:
+            raise AssertionError("cache is not set.")
+
+        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
+        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
+        return (PI @ self._cache_mat_inv @ ONE)[0, 0]
+
+    def _calc_std(self) -> float:
+        """calculate standard deviation of count to collect all items.
+
+        Returns:
+            float: standard deviation.
+        """
+        if (
+            self._cache_index_size is None
+            or self._cache_mat is None
+            or self._cache_mat_inv is None
+            or self._cache_ave is None
+        ):
+            raise AssertionError("cache is not set.")
+
+        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
+        E = np.identity(self._cache_index_size - 1)
+        Q = self._cache_mat[:-1, :-1]
+        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
+        return math.sqrt(
+            (PI @ (E + Q) @ np.linalg.matrix_power(self._cache_mat_inv, 2) @ ONE)[0, 0]
+            - self._cache_ave**2
+        )
+
+    def _calc_pdf(self) -> list[float]:
+        """calculate probability distribution function (pdf).
+
+        Returns:
+            list[float]: pdf values.
+        """
+        if (
+            self._cache_index_size is None
+            or self._cache_mat is None
+            or self._cache_mat_inv is None
+            or self._cache_ave is None
+        ):
+            raise AssertionError("cache is not set.")
+
+        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
+        E = np.identity(self._cache_index_size - 1)
+        Q = self._cache_mat[:-1, :-1]
+        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
+
+        cdf: list[float] = [0, 0]
+
+        powered_q = np.identity(self._cache_index_size - 1)
+        while True:
+            prob = (PI @ (E - powered_q) @ ONE)[0, 0]
+            cdf.append(float(prob))
+            if prob > 0.999:
+                return [cdf[i + 1] - cdf[i] for i, _ in enumerate(cdf[:-1])]
+            powered_q = powered_q @ Q
+
+    def describe(
+        self, pdf: list[float], mode: Literal["monte", "calc"] = "monte"
+    ) -> dict[str, float]:
+        """get monte carlo simulation statistics.
+
+        Args:
+            pdf (list[float]): probability distribution function.
+
+        Returns:
+            tuple[float, float]: average and standard deviation.
+        """
+        cdf = [sum(pdf[: i + 1]) for i, _ in enumerate(pdf)]
+        print(cdf)
+
+        properties: dict[str, float] = {}
+        properties["1%"] = cdf.index(next(i for i in cdf if i >= 0.01))
+        properties["5%"] = cdf.index(next(i for i in cdf if i >= 0.05))
+        properties["10%"] = cdf.index(next(i for i in cdf if i >= 0.10))
+        properties["20%"] = cdf.index(next(i for i in cdf if i >= 0.20))
+        properties["25%"] = cdf.index(next(i for i in cdf if i >= 0.25))
+        properties["50%"] = cdf.index(next(i for i in cdf if i >= 0.50))
+        properties["75%"] = cdf.index(next(i for i in cdf if i >= 0.75))
+        properties["80%"] = cdf.index(next(i for i in cdf if i >= 0.80))
+        properties["90%"] = cdf.index(next(i for i in cdf if i >= 0.90))
+        properties["95%"] = cdf.index(next(i for i in cdf if i >= 0.95))
+        properties["99%"] = cdf.index(next(i for i in cdf if i >= 0.99))
+        if mode == "monte":
+            ave = sum(i * prob for i, prob in enumerate(pdf))
+            variance = sum((i - ave) ** 2 * prob for i, prob in enumerate(pdf))
+            properties["ave"] = ave
+            properties["std"] = math.sqrt(variance)
+        else:
+            properties["ave"] = self._cache_ave
+            properties["std"] = self._cache_std
+        properties["mode"] = pdf.index(max(pdf))
+
+        return properties
