@@ -142,9 +142,12 @@ class ItemModel(FrozenBaseModel):
     required: int = Field(default=1, ge=0)
 
     # use in calc_prob_dist
-    is_grouped: bool = Field(default_factory=bool)  # False
-    group_size: int = Field(default=1, gt=0)
     quantity_state: tuple[int, ...]
+
+    @property
+    def group_size(self) -> int:
+        """get group size."""
+        return sum(self.quantity_state)
 
     @staticmethod
     def build_from_text(text: str) -> tuple[ItemModel, ...]:
@@ -176,7 +179,7 @@ class ItemModel(FrozenBaseModel):
                 "確率が0のアイテムが存在します (アイテム収集が不可能です）"
             )
 
-        sum_weight = sum([item.prob_weight for item in items])
+        sum_weight = sum([item.prob_weight * item.duplicates for item in items])
 
         # all weights are integer
         if all(item.prob_weight.denominator == 1 for item in items):
@@ -185,7 +188,7 @@ class ItemModel(FrozenBaseModel):
                     name=item.name,
                     prob=Fraction(item.prob_weight, sum_weight),
                     required=item.required,
-                    quantity_state=tuple([1] + [0] * item.required),
+                    quantity_state=tuple([item.duplicates] + [0] * item.required),
                 )
                 for item in items
             )
@@ -198,7 +201,7 @@ class ItemModel(FrozenBaseModel):
                 name=item.name,
                 prob=item.prob_weight,
                 required=item.required,
-                quantity_state=tuple([1] + [0] * item.required),
+                quantity_state=tuple([item.duplicates] + [0] * item.required),
             )
             for item in items
         )
@@ -211,11 +214,20 @@ class ItemTable(FrozenBaseModel):
 
     items: tuple[ItemModel, ...]
 
-    _cache_index_size: int | None = PrivateAttr(default=None)
-    _cache_mat: np.ndarray | None = PrivateAttr(default=None)
-    _cache_mat_inv: np.ndarray | None = PrivateAttr(default=None)
-    _cache_ave: float | None = PrivateAttr(default=None)
-    _cache_std: float | None = PrivateAttr(default=None)
+    cache_mat: np.ndarray = Field(default=np.array([]))
+    cache_mat_inv: np.ndarray = Field(default=np.array([]))
+
+    @property
+    def matrix_size(self) -> int:
+        """calculate the probability matrix size.
+
+        Returns:
+            int: matrix size.
+        """
+        n_list = [item.required + item.group_size for item in self]
+        k_list = [item.required for item in self]
+
+        return reduce(operator.mul, [math.comb(n, k) for n, k in zip(n_list, k_list)])
 
     @staticmethod
     def loads(text: str) -> ItemTable:
@@ -266,9 +278,6 @@ class ItemTable(FrozenBaseModel):
                 ):
                     reduced_items[i] = reduced_items[i].model_copy(
                         update={
-                            "is_grouped": True,
-                            "group_size": reduced_items[i].group_size
-                            + reduced_items[j].group_size,
                             "quantity_state": tuple(
                                 f_qs + l_qs
                                 for f_qs, l_qs in zip(
@@ -382,42 +391,29 @@ class ItemTable(FrozenBaseModel):
         Returns:
             np.ndarray: probability matrix.
         """
-        if self._cache_index_size is None:
-            raise AssertionError("cache index size is not set.")
-
         return np.array(
             [
-                [
-                    self._prob_to_move(i, j)
-                    for j in list(range(self._cache_index_size))[::-1]
-                ]
-                for i in list(range(self._cache_index_size))[::-1]
+                [self._prob_to_move(i, j) for j in list(range(self.matrix_size))[::-1]]
+                for i in list(range(self.matrix_size))[::-1]
             ]
         )
 
-    @timeout(10)
-    def set_caches(self) -> None:
+    @timeout(5, use_signals=True)
+    def set_caches(self) -> Self:
         """set caches for probability matrix and its inverse."""
-        if self._cache_index_size is None:
-            n_list = [item.required + item.group_size for item in self]
-            k_list = [item.required for item in self]
 
-            self._cache_index_size = reduce(
-                operator.mul, [math.comb(n, k) for n, k in zip(n_list, k_list)]
-            )
-        if self._cache_index_size is None:
-            raise AssertionError("cache index size is not set.")
+        cache_mat = self._generate_prob_matrix()
 
-        if self._cache_mat is None:
-            self._cache_mat = self._generate_prob_matrix()
-        if self._cache_mat_inv is None:
-            E = np.identity(self._cache_index_size - 1)
-            Q = self._cache_mat[:-1, :-1]
-            self._cache_mat_inv = np.linalg.inv(E - Q)
-        if self._cache_ave is None:
-            self._cache_ave = self._calc_average()
-        if self._cache_std is None:
-            self._cache_std = self._calc_std()
+        E = np.identity(self.matrix_size - 1)
+        Q = cache_mat[:-1, :-1]
+        cache_mat_inv = np.linalg.inv(E - Q)
+
+        return self.model_copy(
+            update={
+                "cache_mat": cache_mat,
+                "cache_mat_inv": cache_mat_inv,
+            }
+        )
 
     def _calc_average(self) -> float:
         """calculate average count to collect all items.
@@ -425,59 +421,40 @@ class ItemTable(FrozenBaseModel):
         Returns:
             float: average count.
         """
-        if self._cache_index_size is None or self._cache_mat is None:
-            raise AssertionError("cache is not set.")
+        PI = np.array([[1] + [0] * (self.matrix_size - 2)])
+        ONE = np.array([[1] * (self.matrix_size - 1)]).T
+        return (PI @ self.cache_mat_inv @ ONE)[0, 0]
 
-        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
-        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
-        return (PI @ self._cache_mat_inv @ ONE)[0, 0]
-
-    def _calc_std(self) -> float:
+    def _calc_std(self, cache_ave: float) -> float:
         """calculate standard deviation of count to collect all items.
 
         Returns:
             float: standard deviation.
         """
-        if (
-            self._cache_index_size is None
-            or self._cache_mat is None
-            or self._cache_mat_inv is None
-            or self._cache_ave is None
-        ):
-            raise AssertionError("cache is not set.")
-
-        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
-        E = np.identity(self._cache_index_size - 1)
-        Q = self._cache_mat[:-1, :-1]
-        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
+        PI = np.array([[1] + [0] * (self.matrix_size - 2)])
+        E = np.identity(self.matrix_size - 1)
+        Q = self.cache_mat[:-1, :-1]
+        ONE = np.array([[1] * (self.matrix_size - 1)]).T
         return math.sqrt(
-            (PI @ (E + Q) @ np.linalg.matrix_power(self._cache_mat_inv, 2) @ ONE)[0, 0]
-            - self._cache_ave**2
+            (PI @ (E + Q) @ np.linalg.matrix_power(self.cache_mat_inv, 2) @ ONE)[0, 0]
+            - cache_ave**2
         )
 
-    @timeout(10)
+    @timeout(10, use_signals=True)
     def calc_pdf(self) -> list[float]:
         """calculate probability distribution function (pdf).
 
         Returns:
             list[float]: pdf values.
         """
-        if (
-            self._cache_index_size is None
-            or self._cache_mat is None
-            or self._cache_mat_inv is None
-            or self._cache_ave is None
-        ):
-            raise AssertionError("cache is not set.")
-
-        PI = np.array([[1] + [0] * (self._cache_index_size - 2)])
-        E = np.identity(self._cache_index_size - 1)
-        Q = self._cache_mat[:-1, :-1]
-        ONE = np.array([[1] * (self._cache_index_size - 1)]).T
+        PI = np.array([[1] + [0] * (self.matrix_size - 2)])
+        E = np.identity(self.matrix_size - 1)
+        Q = self.cache_mat[:-1, :-1]
+        ONE = np.array([[1] * (self.matrix_size - 1)]).T
 
         cdf: list[float] = [0]
 
-        powered_q = np.identity(self._cache_index_size - 1)
+        powered_q = np.identity(self.matrix_size - 1)
         while True:
             prob = (PI @ (E - powered_q) @ ONE)[0, 0]
             cdf.append(float(prob))
@@ -497,22 +474,25 @@ class ItemTable(FrozenBaseModel):
         properties: dict[str, float] = {}
         if pdf is not None:
             cdf = [sum(pdf[: i + 1]) for i, _ in enumerate(pdf)]
-            properties["1%"] = cdf.index(next(i for i in cdf if i >= 0.01))
-            properties["5%"] = cdf.index(next(i for i in cdf if i >= 0.05))
-            properties["10%"] = cdf.index(next(i for i in cdf if i >= 0.10))
-            properties["20%"] = cdf.index(next(i for i in cdf if i >= 0.20))
-            properties["25%"] = cdf.index(next(i for i in cdf if i >= 0.25))
-            properties["50%"] = cdf.index(next(i for i in cdf if i >= 0.50))
-            properties["75%"] = cdf.index(next(i for i in cdf if i >= 0.75))
-            properties["80%"] = cdf.index(next(i for i in cdf if i >= 0.80))
-            properties["90%"] = cdf.index(next(i for i in cdf if i >= 0.90))
-            properties["95%"] = cdf.index(next(i for i in cdf if i >= 0.95))
-            properties["99%"] = cdf.index(next(i for i in cdf if i >= 0.99))
+            for key in [
+                "1%",
+                "5%",
+                "10%",
+                "20%",
+                "25%",
+                "50%",
+                "75%",
+                "80%",
+                "90%",
+                "95%",
+                "99%",
+            ]:
+                properties[key] = cdf.index(
+                    next(i for i in cdf if i >= float(key.strip("%")) / 100)
+                )
 
-        if self._cache_ave is not None:
-            properties["平均"] = self._cache_ave
-        if self._cache_std is not None:
-            properties["標準偏差"] = self._cache_std
+        properties["平均"] = self._calc_average()
+        properties["標準偏差"] = self._calc_std(properties["平均"])
 
         if pdf is not None:
             properties["最頻値"] = pdf.index(max(pdf))

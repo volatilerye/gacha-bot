@@ -1,4 +1,4 @@
-from timeout_decorator import TimeoutError
+from timeout_decorator import TimeoutError, timeout
 
 from models import (
     DuplicatesValidationError,
@@ -21,45 +21,47 @@ def gacha(text: str) -> str:
         table = ItemTable.loads(text=text).optimize()
     except ProbabilityValidationError as e:
         return (
-            f"❌ 失敗: 確率（または確率の整数比）の指定が誤っています\n```\n{e}\n```\n"
+            f"❌ **失敗**: 確率（または確率の整数比）の指定が誤っています\n```\n{e}\n```\n"
             "次のいずれかで指定してください\n"
             "- 全てのアイテムの確率を0より大きく1以下の値で指定する\n"
             "- 全てのアイテムの確率を正の整数による比で指定する\n"
         )
     except RequiredValidationError as e:
         return (
-            f"❌ 失敗: 必要数の指定が誤っています\n```\n{e}\n```\n"
+            f"❌ **失敗**: 必要数の指定が誤っています\n```\n{e}\n```\n"
             "必要数は非負整数で指定してください（省略した場合はデフォルトで1になります）"
         )
     except DuplicatesValidationError as e:
         return (
-            f"❌ 失敗: 重複数の指定が誤っています\n```\n{e}\n```\n"
+            f"❌ **失敗**: 重複数の指定が誤っています\n```\n{e}\n```\n"
             "必要数は非負整数で指定してください（省略した場合はデフォルトで1になります）"
         )
     except Exception as e:
         return (
-            f"❌ 失敗: コマンドの指定が誤っています"
+            "❌ **失敗**: コマンドの指定が誤っています"
             '"?gacha" コマンドで使い方を確認してください'
         )
 
+    # set caches (and calc average and standard deviation)
     try:
-        table.set_caches()
+        table = table.set_caches()
     except TimeoutError:
-        return "⏱️ 失敗: 計算がタイムアウトしました！（組み合わせが多すぎます！）"
+        return "⏱️ **失敗**: 計算がタイムアウトしました！（組み合わせが多すぎます！）"
     except Exception as e:
-        return f"❌ 失敗: 予期しないエラーが発生しました！\n```\n{e}\n```"
+        return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
+    print("!")
+
+    # calculate probability distribution
     result = ""
     pdf: list[float] | None = None
 
     try:
         pdf = table.calc_pdf()
     except TimeoutError:
-        result += (
-            "⏱️ 中断: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
-        )
+        result += "⏱️ **中断**: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
     except Exception as e:
-        return f"❌ 失敗: 予期しないエラーが発生しました！\n```\n{e}\n```"
+        return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
     properties = table.describe(pdf)
     result += "```\n"

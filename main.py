@@ -29,11 +29,11 @@ async def on_message(message):
     if message.content.startswith("!gacha"):
         try:
             response = gacha(message.content.split("\n", maxsplit=1)[1])
-        except Exception as e:
+        except Exception:
             response = (
-            "❌ 失敗: 入力方法が正しくありません！\n"
-            '"?gacha" コマンドで使い方を確認してください'
-        )
+                "❌ **失敗**: 入力方法が正しくありません！\n"
+                '"?gacha" コマンドで使い方を確認してください'
+            )
 
         await message.channel.send(response)
     elif message.content == "?gacha":
