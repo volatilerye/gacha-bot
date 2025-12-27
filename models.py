@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import bisect
 import math
 import operator
-import random
 import re
 from fractions import Fraction
 from functools import reduce
@@ -143,9 +141,6 @@ class ItemModel(FrozenBaseModel):
     prob: Fraction = Field(default_factory=Fraction, ge=0, le=1)
     required: int = Field(default=1, ge=0)
 
-    # use in monte carlo simulation
-    quantity: int = Field(default_factory=int, ge=0)
-
     # use in calc_prob_dist
     is_grouped: bool = Field(default_factory=bool)  # False
     group_size: int = Field(default=1, gt=0)
@@ -250,69 +245,6 @@ class ItemTable(FrozenBaseModel):
     def __iter__(self) -> Generator[ItemModel, None, None]:
         yield from self.items
 
-    def _add_quantity(self, index: int) -> Self:
-        """add item quantity.
-
-        Args:
-            index (int): index of the item to add quantity to.
-
-        Returns:
-            Self: a new instance with the updated item quantity.
-        """
-        return self.__class__(
-            items=tuple(
-                item.model_copy(
-                    update={"quantity": item.quantity + 1} if i == index else {}
-                )
-                for i, item in enumerate(self)
-            )
-        )
-
-    def _reset_quantities(self) -> Self:
-        """reset quantities of all items to zero.
-
-        Returns:
-            Self: a new instance with all item quantities reset to zero.
-        """
-        return self.__class__(
-            items=tuple(item.model_copy(update={"quantity": 0}) for item in self)
-        )
-
-    def run_monte_carlo(self, attempts: int = 2000) -> list[float]:
-        """run monte carlo simulation and return the probability distribution function.
-
-        Args:
-            attempts (int, optional): number of attempts. Defaults to 1000.
-
-        Returns:
-            list[float]: pdf values.
-        """
-        attempt_count: int = 0
-        gacha_count: int = 0
-
-        results: list[int] = []
-
-        cumulative_prob = [
-            sum(item.prob for item in self[: i + 1]) for i in range(len(self))
-        ]
-
-        while attempt_count < attempts:
-            gacha_table: ItemTable = self._reset_quantities()
-            gacha_count = 0
-
-            while True:
-                index = bisect.bisect_right(cumulative_prob, random.random())
-                if index < len(cumulative_prob):
-                    gacha_table = gacha_table._add_quantity(index=index)
-
-                gacha_count += 1
-                if all(item.quantity >= item.required for item in gacha_table):
-                    results.append(gacha_count)
-                    attempt_count += 1
-                    break
-
-        return [float(results.count(i) / attempts) for i in range(0, max(results) + 1)]
-
     def optimize(self) -> Self:
         """optimize markov process to reduce number of state.
 
@@ -325,10 +257,13 @@ class ItemTable(FrozenBaseModel):
         # group items with the same appearance probability
         # and required quantity together
         for i, former in enumerate(reduced_items):
-            if former.required == 0:
+            if former.quantity_state == tuple():
                 continue
             for j, latter in enumerate(reduced_items[i + 1 :], start=i + 1):
-                if former.prob == latter.prob and former.required == latter.required:
+                if (
+                    former.prob == latter.prob
+                    and former.quantity_state == latter.quantity_state
+                ):
                     reduced_items[i] = reduced_items[i].model_copy(
                         update={
                             "is_grouped": True,
@@ -344,11 +279,13 @@ class ItemTable(FrozenBaseModel):
                         }
                     )
                     reduced_items[j] = reduced_items[j].model_copy(
-                        update={"required": 0}
+                        update={"quantity_state": tuple()}
                     )
 
         return self.__class__(
-            items=tuple(item for item in reduced_items if item.required > 0)
+            items=tuple(
+                item for item in reduced_items if item.quantity_state != tuple()
+            )
         )
 
     def _to_index(self) -> int:
