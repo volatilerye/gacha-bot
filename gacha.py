@@ -1,4 +1,4 @@
-from timeout_decorator import TimeoutError, timeout
+from timeout_decorator import TimeoutError
 
 from models import (
     DuplicatesValidationError,
@@ -44,26 +44,44 @@ def gacha(text: str) -> str:
 
     # set caches (and calc average and standard deviation)
     try:
-        table = table.set_caches()
+        table = table.set_mat_caches()
     except TimeoutError:
-        return "⏱️ **失敗**: 計算がタイムアウトしました！（組み合わせが多すぎます！）"
+        return "⏱️ **失敗**: 確率遷移行列の計算がタイムアウトしました！（組み合わせが多すぎます！）"
     except Exception as e:
         return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
-    print("!")
+    # set averages
+    try:
+        table = table.set_average()
+    except TimeoutError:
+        return "⏱️ **失敗**: 平均回数の計算がタイムアウトしました！（組み合わせが多すぎます！）"
+    except Exception as e:
+        return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
     # calculate probability distribution
     result = ""
     pdf: list[float] | None = None
 
-    try:
-        pdf = table.calc_pdf()
-    except TimeoutError:
-        result += "⏱️ **中断**: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
-    except Exception as e:
-        return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
+    if table.cache_ave >= 0:
+        try:
+            table = table.set_std()
+        except TimeoutError:
+            result += "⏱️ **中断**: 標準偏差の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
+        except Exception as e:
+            result += f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```\n"
+
+    if table.cache_std >= 0:
+        try:
+            pdf = table.calc_pdf()
+        except TimeoutError:
+            result += "⏱️ **中断**: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
+        except Exception as e:
+            return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```\n"
 
     properties = table.describe(pdf)
+    if len(properties) == 0:
+        return result
+
     result += "```\n"
 
     for key, value in properties.items():

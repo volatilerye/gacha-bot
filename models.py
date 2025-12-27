@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import bisect
 import math
 import operator
 import re
 from fractions import Fraction
 from functools import reduce
+from itertools import accumulate
 from typing import Collection, Generator, Self, overload, override
 
-# from itertools import
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from timeout_decorator import timeout
 
 from util import convert_index_to_prod_combination, convert_prod_combination_to_index
@@ -216,6 +217,8 @@ class ItemTable(FrozenBaseModel):
 
     cache_mat: np.ndarray = Field(default=np.array([]))
     cache_mat_inv: np.ndarray = Field(default=np.array([]))
+    cache_ave: float = Field(default=-1)
+    cache_std: float = Field(default=-1)
 
     @property
     def matrix_size(self) -> int:
@@ -398,8 +401,8 @@ class ItemTable(FrozenBaseModel):
             ]
         )
 
-    @timeout(5, use_signals=True)
-    def set_caches(self) -> Self:
+    @timeout(5)
+    def set_mat_caches(self) -> Self:
         """set caches for probability matrix and its inverse."""
 
         cache_mat = self._generate_prob_matrix()
@@ -415,32 +418,37 @@ class ItemTable(FrozenBaseModel):
             }
         )
 
-    def _calc_average(self) -> float:
-        """calculate average count to collect all items.
-
-        Returns:
-            float: average count.
-        """
+    @timeout(5)
+    def set_average(self) -> Self:
+        """set average count to collect all items."""
         PI = np.array([[1] + [0] * (self.matrix_size - 2)])
         ONE = np.array([[1] * (self.matrix_size - 1)]).T
-        return (PI @ self.cache_mat_inv @ ONE)[0, 0]
+        return self.model_copy(
+            update={"cache_ave": (PI @ self.cache_mat_inv @ ONE)[0, 0]}
+        )
 
-    def _calc_std(self, cache_ave: float) -> float:
-        """calculate standard deviation of count to collect all items.
-
-        Returns:
-            float: standard deviation.
-        """
+    @timeout(5)
+    def set_std(self) -> Self:
+        """set standard deviation count to collect all items."""
         PI = np.array([[1] + [0] * (self.matrix_size - 2)])
         E = np.identity(self.matrix_size - 1)
         Q = self.cache_mat[:-1, :-1]
         ONE = np.array([[1] * (self.matrix_size - 1)]).T
-        return math.sqrt(
-            (PI @ (E + Q) @ np.linalg.matrix_power(self.cache_mat_inv, 2) @ ONE)[0, 0]
-            - cache_ave**2
+        return self.model_copy(
+            update={
+                "cache_std": math.sqrt(
+                    (
+                        PI
+                        @ (E + Q)
+                        @ np.linalg.matrix_power(self.cache_mat_inv, 2)
+                        @ ONE
+                    )[0, 0]
+                    - self.cache_ave**2
+                )
+            }
         )
 
-    @timeout(10, use_signals=True)
+    @timeout(15)
     def calc_pdf(self) -> list[float]:
         """calculate probability distribution function (pdf).
 
@@ -473,7 +481,7 @@ class ItemTable(FrozenBaseModel):
         """
         properties: dict[str, float] = {}
         if pdf is not None:
-            cdf = [sum(pdf[: i + 1]) for i, _ in enumerate(pdf)]
+            cdf = list(accumulate(pdf))
             for key in [
                 "1%",
                 "5%",
@@ -487,12 +495,15 @@ class ItemTable(FrozenBaseModel):
                 "95%",
                 "99%",
             ]:
-                properties[key] = cdf.index(
-                    next(i for i in cdf if i >= float(key.strip("%")) / 100)
-                )
+                target_value = float(key.strip("%")) / 100
+                idx = bisect.bisect_left(cdf, target_value)
+                if idx < len(cdf):
+                    properties[key] = idx
 
-        properties["平均"] = self._calc_average()
-        properties["標準偏差"] = self._calc_std(properties["平均"])
+        if self.cache_ave >= 0:
+            properties["平均"] = self.cache_ave
+        if self.cache_std >= 0:
+            properties["標準偏差"] = self.cache_std
 
         if pdf is not None:
             properties["最頻値"] = pdf.index(max(pdf))
