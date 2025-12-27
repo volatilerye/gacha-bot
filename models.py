@@ -22,11 +22,17 @@ LINE_SEPARATORS = "[\r\n]"
 COMMA_PATTERN = "[,、，]"
 
 
-class ProbabilityError(Exception):
-    """errors about probability."""
+class ProbabilityValidationError(Exception):
+    """errors about probability field."""
 
-class RequiredError(Exception):
+
+class RequiredValidationError(Exception):
     """errors about required field."""
+
+
+class DuplicatesValidationError(Exception):
+    """errors about Duplicates field."""
+
 
 class FrozenBaseModel(BaseModel):
     """frozen pydantic base model."""
@@ -40,22 +46,34 @@ class PreItemModel(FrozenBaseModel):
     name: str
     prob_weight: Fraction
     required: int = Field(default=1)
+    duplicates: int = Field(default=1)
 
     @field_validator("prob_weight")
     @classmethod
-    def validate_prob_weight(cls, v: Fraction) -> str:
-        if not (0<=v and (v.denominator == 1 or 0<=v<=1)):
-            raise ProbabilityError(f"不正な確率（または確率の整数比）です: {v}")
+    def validate_prob_weight(cls, v: Fraction) -> Fraction:
+        """validate proba_weight field."""
+        if not (0 <= v and (v.denominator == 1 or 0 <= v <= 1)):
+            raise ProbabilityValidationError(
+                f"不正な確率（または確率の整数比）です: {v}"
+            )
         return v
 
     @field_validator("required")
     @classmethod
-    def validate_required(cls, v: int) -> str:
+    def validate_required(cls, v: int) -> int:
+        """validate required field."""
         if v < 0:
-            raise RequiredError(f"不正な必要数です: {v}")
+            raise RequiredValidationError(f"不正な必要数です: {v}")
         return v
-    
-    
+
+    @field_validator("duplicates")
+    @classmethod
+    def validate_duplicates(cls, v: int) -> int:
+        """validate duplicates field."""
+        if v < 0:
+            raise DuplicatesValidationError(f"不正な重複数です: {v}")
+        return v
+
     @staticmethod
     def build_all(text: str) -> tuple[PreItemModel, ...]:
         """build all PreItemModel instances from string.
@@ -84,13 +102,15 @@ class PreItemModel(FrozenBaseModel):
         """
         split_list = [
             unit
-            for unit in re.split(pattern=COMMA_PATTERN, string=text, maxsplit=2)
+            for unit in re.split(pattern=COMMA_PATTERN, string=text, maxsplit=3)
             if len(unit) > 0
         ]
 
         match len(split_list):
             case 1:
-                raise ProbabilityError(f"確率（または確率の整数比）が指定されていません: {text}")
+                raise ProbabilityValidationError(
+                    f"確率（または確率の整数比）が指定されていません: {text}"
+                )
             case 2:
                 return PreItemModel(
                     name=split_list[0], prob_weight=Fraction(split_list[1])
@@ -100,6 +120,13 @@ class PreItemModel(FrozenBaseModel):
                     name=split_list[0],
                     prob_weight=Fraction(split_list[1]),
                     required=int(split_list[2]),
+                )
+            case 4:
+                return PreItemModel(
+                    name=split_list[0],
+                    prob_weight=Fraction(split_list[1]),
+                    required=int(split_list[2]),
+                    duplicates=int(split_list[3]),
                 )
             case _:
                 pass
@@ -150,7 +177,9 @@ class ItemModel(FrozenBaseModel):
             list[PreItemModel]: preprocessed item models.
         """
         if any(item.prob_weight == 0 for item in items):
-            raise ProbabilityError("確率が0のアイテムが存在します (アイテム収集が不可能です）")
+            raise ProbabilityValidationError(
+                "確率が0のアイテムが存在します (アイテム収集が不可能です）"
+            )
 
         sum_weight = sum([item.prob_weight for item in items])
 
@@ -167,7 +196,7 @@ class ItemModel(FrozenBaseModel):
             )
 
         if sum_weight > 1:
-            raise ProbabilityError("全事象の確率が1を超えています")
+            raise ProbabilityValidationError("全事象の確率が1を超えています")
 
         return tuple(
             ItemModel(
