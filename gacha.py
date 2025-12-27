@@ -1,19 +1,39 @@
-from models import ItemTable
-
+from models import ItemTable, ProbabilityError, RequiredError
+from timeout_decorator import TimeoutError
 
 def gacha(text: str) -> str:
+    """Simulate gacha pulls based on the provided item table text.
+    
+    Args:
+        text (str): The input text defining items, their probabilities, and required counts.
+        
+    Returns:
+        str: The result of the gacha simulation or an error message.
+    """
     try:
         table = ItemTable.loads(text=text).optimize()
-    except Exception:
+    except ProbabilityError as e:
         return (
-            "❌ 失敗: 入力方法が正しくありません！\n"
+            f"❌ 失敗: 確率（または確率の整数比）の指定が誤っています\n```\n{e}\n```\n"
+            '次のいずれかで指定してください\n'
+            '- 全てのアイテムの確率を0より大きく1以下の値で指定する\n'
+            '- 全てのアイテムの確率を正の整数による比で指定する\n'
+        )
+    except RequiredError as e:
+        return (
+            f"❌ 失敗: 必要数の指定が誤っています\n```\n{e}\n```\n"
+            '必要数は非負整数で指定してください（省略した場合はデフォルトで1になります）'
+        )
+    except Exception as e:
+        return (
+            f"❌ 失敗: コマンドの指定が誤っています"
             '"?gacha" コマンドで使い方を確認してください'
         )
 
     try:
         table.set_caches()
     except TimeoutError:
-        return "❌ 失敗: 計算がタイムアウトしました！（組み合わせが多すぎます！）"
+        return "⏱️ 失敗: 計算がタイムアウトしました！（組み合わせが多すぎます！）"
     except Exception as e:
         return f"❌ 失敗: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
@@ -24,7 +44,7 @@ def gacha(text: str) -> str:
         pdf = table.calc_pdf()
     except TimeoutError:
         result += (
-            "⚠️ 情報: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
+            "⏱️ 中断: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
         )
     except Exception as e:
         return f"❌ 失敗: 予期しないエラーが発生しました！\n```\n{e}\n```"
@@ -42,6 +62,3 @@ def gacha(text: str) -> str:
 
     return result
 
-
-if __name__ == "__main__":
-    print(gacha("★1, 1/100"))

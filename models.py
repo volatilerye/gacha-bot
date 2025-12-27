@@ -13,7 +13,7 @@ from typing import Collection, Generator, Self, overload, override
 
 # from itertools import
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 from timeout_decorator import timeout
 
 from util import convert_index_to_prod_combination, convert_prod_combination_to_index
@@ -25,6 +25,8 @@ COMMA_PATTERN = "[,、，]"
 class ProbabilityError(Exception):
     """errors about probability."""
 
+class RequiredError(Exception):
+    """errors about required field."""
 
 class FrozenBaseModel(BaseModel):
     """frozen pydantic base model."""
@@ -36,9 +38,24 @@ class PreItemModel(FrozenBaseModel):
     """item model before handling."""
 
     name: str
-    prob_weight: Fraction = Field(ge=0, default_factory=Fraction)
-    required: int = Field(ge=0, default=1)
+    prob_weight: Fraction
+    required: int = Field(default=1)
 
+    @field_validator("prob_weight")
+    @classmethod
+    def validate_prob_weight(cls, v: Fraction) -> str:
+        if not (0<=v and (v.denominator == 1 or 0<=v<=1)):
+            raise ProbabilityError(f"不正な確率（または確率の整数比）です: {v}")
+        return v
+
+    @field_validator("required")
+    @classmethod
+    def validate_required(cls, v: int) -> str:
+        if v < 0:
+            raise RequiredError(f"不正な必要数です: {v}")
+        return v
+    
+    
     @staticmethod
     def build_all(text: str) -> tuple[PreItemModel, ...]:
         """build all PreItemModel instances from string.
@@ -73,7 +90,7 @@ class PreItemModel(FrozenBaseModel):
 
         match len(split_list):
             case 1:
-                return PreItemModel(name=split_list[0])
+                raise ProbabilityError(f"確率（または確率の整数比）が指定されていません: {text}")
             case 2:
                 return PreItemModel(
                     name=split_list[0], prob_weight=Fraction(split_list[1])
@@ -132,9 +149,10 @@ class ItemModel(FrozenBaseModel):
         Args:
             list[PreItemModel]: preprocessed item models.
         """
+        if any(item.prob_weight == 0 for item in items):
+            raise ProbabilityError("確率が0のアイテムが存在します (アイテム収集が不可能です）")
+
         sum_weight = sum([item.prob_weight for item in items])
-        if sum_weight == 0:
-            raise ProbabilityError("probability of each item is 0.")
 
         # all weights are integer
         if all(item.prob_weight.denominator == 1 for item in items):
@@ -149,7 +167,7 @@ class ItemModel(FrozenBaseModel):
             )
 
         if sum_weight > 1:
-            raise ProbabilityError("the probability of all events is over 1.")
+            raise ProbabilityError("全事象の確率が1を超えています")
 
         return tuple(
             ItemModel(
