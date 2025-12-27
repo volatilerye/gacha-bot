@@ -9,11 +9,12 @@ import random
 import re
 from fractions import Fraction
 from functools import reduce
-from typing import Collection, Generator, Literal, Self, overload, override
+from typing import Collection, Generator, Self, overload, override
 
 # from itertools import
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from timeout_decorator import timeout
 
 from util import convert_index_to_prod_combination, convert_prod_combination_to_index
 
@@ -265,7 +266,7 @@ class ItemTable(FrozenBaseModel):
 
         return [float(results.count(i) / attempts) for i in range(0, max(results) + 1)]
 
-    def _optimize(self) -> Self:
+    def optimize(self) -> Self:
         """optimize markov process to reduce number of state.
 
         Returns:
@@ -374,7 +375,9 @@ class ItemTable(FrozenBaseModel):
             return 0
 
         if len(filtered) == 0:
-            return float(sum(item.prob * item.quantity_state[-1] for item in src))
+            return 1 - float(
+                sum(item.prob * sum(item.quantity_state[:-1]) for item in src)
+            )
 
         diff = filtered[0]
         for i, _ in enumerate(diff["src"].quantity_state[:-1]):
@@ -408,7 +411,8 @@ class ItemTable(FrozenBaseModel):
             ]
         )
 
-    def _set_caches(self) -> None:
+    @timeout(10)
+    def set_caches(self) -> None:
         """set caches for probability matrix and its inverse."""
         if self._cache_index_size is None:
             n_list = [item.required + item.group_size for item in self]
@@ -467,7 +471,8 @@ class ItemTable(FrozenBaseModel):
             - self._cache_ave**2
         )
 
-    def _calc_pdf(self) -> list[float]:
+    @timeout(10)
+    def calc_pdf(self) -> list[float]:
         """calculate probability distribution function (pdf).
 
         Returns:
@@ -486,7 +491,7 @@ class ItemTable(FrozenBaseModel):
         Q = self._cache_mat[:-1, :-1]
         ONE = np.array([[1] * (self._cache_index_size - 1)]).T
 
-        cdf: list[float] = [0, 0]
+        cdf: list[float] = [0]
 
         powered_q = np.identity(self._cache_index_size - 1)
         while True:
@@ -496,9 +501,7 @@ class ItemTable(FrozenBaseModel):
                 return [cdf[i + 1] - cdf[i] for i, _ in enumerate(cdf[:-1])]
             powered_q = powered_q @ Q
 
-    def describe(
-        self, pdf: list[float], mode: Literal["monte", "calc"] = "monte"
-    ) -> dict[str, float]:
+    def describe(self, pdf: list[float] | None = None) -> dict[str, float]:
         """get monte carlo simulation statistics.
 
         Args:
@@ -507,29 +510,27 @@ class ItemTable(FrozenBaseModel):
         Returns:
             tuple[float, float]: average and standard deviation.
         """
-        cdf = [sum(pdf[: i + 1]) for i, _ in enumerate(pdf)]
-        print(cdf)
-
         properties: dict[str, float] = {}
-        properties["1%"] = cdf.index(next(i for i in cdf if i >= 0.01))
-        properties["5%"] = cdf.index(next(i for i in cdf if i >= 0.05))
-        properties["10%"] = cdf.index(next(i for i in cdf if i >= 0.10))
-        properties["20%"] = cdf.index(next(i for i in cdf if i >= 0.20))
-        properties["25%"] = cdf.index(next(i for i in cdf if i >= 0.25))
-        properties["50%"] = cdf.index(next(i for i in cdf if i >= 0.50))
-        properties["75%"] = cdf.index(next(i for i in cdf if i >= 0.75))
-        properties["80%"] = cdf.index(next(i for i in cdf if i >= 0.80))
-        properties["90%"] = cdf.index(next(i for i in cdf if i >= 0.90))
-        properties["95%"] = cdf.index(next(i for i in cdf if i >= 0.95))
-        properties["99%"] = cdf.index(next(i for i in cdf if i >= 0.99))
-        if mode == "monte":
-            ave = sum(i * prob for i, prob in enumerate(pdf))
-            variance = sum((i - ave) ** 2 * prob for i, prob in enumerate(pdf))
-            properties["ave"] = ave
-            properties["std"] = math.sqrt(variance)
-        else:
-            properties["ave"] = self._cache_ave
-            properties["std"] = self._cache_std
-        properties["mode"] = pdf.index(max(pdf))
+        if pdf is not None:
+            cdf = [sum(pdf[: i + 1]) for i, _ in enumerate(pdf)]
+            properties["1%"] = cdf.index(next(i for i in cdf if i >= 0.01))
+            properties["5%"] = cdf.index(next(i for i in cdf if i >= 0.05))
+            properties["10%"] = cdf.index(next(i for i in cdf if i >= 0.10))
+            properties["20%"] = cdf.index(next(i for i in cdf if i >= 0.20))
+            properties["25%"] = cdf.index(next(i for i in cdf if i >= 0.25))
+            properties["50%"] = cdf.index(next(i for i in cdf if i >= 0.50))
+            properties["75%"] = cdf.index(next(i for i in cdf if i >= 0.75))
+            properties["80%"] = cdf.index(next(i for i in cdf if i >= 0.80))
+            properties["90%"] = cdf.index(next(i for i in cdf if i >= 0.90))
+            properties["95%"] = cdf.index(next(i for i in cdf if i >= 0.95))
+            properties["99%"] = cdf.index(next(i for i in cdf if i >= 0.99))
+
+        if self._cache_ave is not None:
+            properties["平均"] = self._cache_ave
+        if self._cache_std is not None:
+            properties["標準偏差"] = self._cache_std
+
+        if pdf is not None:
+            properties["最頻値"] = pdf.index(max(pdf))
 
         return properties
