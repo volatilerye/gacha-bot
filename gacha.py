@@ -46,7 +46,7 @@ def gacha(text: str) -> str:
     try:
         table = table.set_mat_caches()
     except TimeoutError:
-        return "⏱️ **失敗**: 確率遷移行列の計算がタイムアウトしました！（組み合わせが多すぎます！）"
+        return "⏱️ **失敗**: 確率遷移行列の計算がタイムアウトしました（組み合わせが多過ぎます！）"
     except Exception as e:
         return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
@@ -54,7 +54,7 @@ def gacha(text: str) -> str:
     try:
         table = table.set_average()
     except TimeoutError:
-        return "⏱️ **失敗**: 平均回数の計算がタイムアウトしました！（組み合わせが多すぎます！）"
+        return "⏱️ **失敗**: 平均回数の計算がタイムアウトしました（組み合わせが多過ぎます！）"
     except Exception as e:
         return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```"
 
@@ -66,7 +66,7 @@ def gacha(text: str) -> str:
         try:
             table = table.set_std()
         except TimeoutError:
-            result += "⏱️ **中断**: 標準偏差の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
+            result += "⏱️ **中断**: 標準偏差の計算がタイムアウトしました（組み合わせが多過ぎます！）\n"
         except Exception as e:
             result += f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```\n"
 
@@ -74,7 +74,7 @@ def gacha(text: str) -> str:
         try:
             pdf = table.calc_pdf()
         except TimeoutError:
-            result += "⏱️ **中断**: 分布の計算がタイムアウトしました！（組み合わせが多すぎます！）\n"
+            result += "⏱️ **中断**: 分布の計算がタイムアウトしました（アイテムの出現確率が低過ぎるか組み合わせが多過ぎます！）\n"
         except Exception as e:
             return f"❌ **失敗**: 予期しないエラーが発生しました！\n```\n{e}\n```\n"
 
