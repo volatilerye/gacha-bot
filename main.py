@@ -7,7 +7,8 @@ from gacha import gacha
 
 load_dotenv()
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -21,9 +22,16 @@ async def on_ready():
 
 
 @client.event
-async def on_message(message):
+async def on_message(message: discord.message.Message):
     # do not respond to bot messages
     if message.author.bot:
+        return
+
+    # respond only selected channel
+    print(
+        type(message),
+    )
+    if message.channel.id != int(CHANNEL_ID):
         return
 
     if message.content.startswith("!gacha"):
